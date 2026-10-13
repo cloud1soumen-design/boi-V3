@@ -251,6 +251,7 @@ async function tr(t,sl,tl){
  t=t.trim();tl=tl||'bn';const k=hk(sl+tl+(tl==='bn'?reg:'')+t);
  if(cache.has(k))return cache.get(k);
  const c=await kvGet(k);if(c!==undefined){cache.set(k,c);return c}
+ if(noNet){noNetHits++;throw new Error('nonet')}
  let r,sgs=null;
  try{
   const j=await (await fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl='+sl+'&tl='+tl+'&dt=t&q='+encodeURIComponent(t))).json();
@@ -270,6 +271,7 @@ async function segsOf(t,sl){
  t=t.trim();const k=hk(sl+'bn'+reg+t);
  let g=segMem.get(k);if(g)return g;
  g=await kvGet('sg:'+k);if(g){segMem.set(k,g);return g}
+ if(noNet)return[];
  try{
   const j=await (await fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl='+sl+'&tl=bn&dt=t&q='+encodeURIComponent(t))).json();
   g=j[0].map(x=>({bn:reg==='wb'?wbFix(x[0]||''):(x[0]||''),en:x[1]||''}));
@@ -713,12 +715,12 @@ function parseGloss(t){
 }
 async function loadGloss(u){
  const r=await fetch(u,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);
- const list=parseGloss(await r.text());
+ const txt=await r.text(),trusted=/^\s*#\s*(trusted|যাচাই)/im.test(txt),list=parseGloss(txt);
  if(!list.length)throw new Error('কোনো "English = বাংলা" লাইন পাইনি');
  let add=0,upd=0;
  list.forEach(([en,b])=>{
   const k=en.toLowerCase(),g=gl.find(x=>x.en.toLowerCase()===k),val=/^keep_?en$/i.test(b)?undefined:b;
-  if(!g){gl.push(Object.assign(val?{en,bn:val}:{en},{rv:true,src:'অনলাইন শব্দকোষ'}));webKeys.add(k);add++}
+  if(!g){gl.push(Object.assign(val?{en,bn:val}:{en},trusted?{src:'আমার শব্দকোষ ফাইল'}:{rv:true,src:'অনলাইন শব্দকোষ'}));webKeys.add(k);add++}
   else if(webKeys.has(k)&&g.bn!==val){if(val)g.bn=val;else delete g.bn;upd++}
  });
  saveGl();ls.set('glwk',JSON.stringify([...webKeys]));glt=Date.now();ls.set('glt',String(glt));
@@ -753,17 +755,18 @@ async function hybridAI(blks,my){
   if(my!==tok)return;
   sel.forEach((b,k)=>{if(res[k]!=null)applyAI(b,res[k])});
   setSt('✓ Google + AI ('+provName()+') — ✨ চিহ্নিত অংশ AI-র করা');
- }catch(e){if(my===tok){setSt('✓ Google · AI-র উন্নতি আসেনি: '+gerr(e).replace(' এখন Google Translate চলছে।','').replace(' Google Translate দিয়ে চলছে।',''));suggestGpt()}}
+ }catch(e){lastAiState='fail';if(my===tok){setSt('✓ Google · AI-র উন্নতি আসেনি: '+gerr(e).replace(' এখন Google Translate চলছে।','').replace(' Google Translate দিয়ে চলছে।',''));suggestGpt()}}
 }
 async function translateAll(){
- const my=++tok,seen=new Set();let aiFailed=false;useCnt={};aheadTok++;
+ const my=++tok,seen=new Set();let aiFailed=false;useCnt={};aheadTok++;lastAiState=llmOn()?'done':(aiBlocked()?'fail':'off');
  let blks=[...view.querySelectorAll('.blk')];
  for(const b of blks){b.querySelector('.tr').textContent='';b.querySelector('.tr').classList.remove('ai');b.querySelectorAll('.il').forEach(n=>n.remove());b.classList.remove('done','show','il-has')}
+ if(await applyPageLock(blks)){lastAiFor={key,pos};setSt('🔒 পাতা লক করা: নতুন অনুবাদ হয়নি (ডেটা ও কোটা বাঁচল)');showTally();aheadPump();setTimeout(syncPage,800);return}
  {const rest=[];for(const b of blks){const tx=b.querySelector('.o').textContent,lk=await pget('lk:'+hk(tx));if(lk&&lk.t){const d=b.querySelector('.tr');d.textContent=lk.t;fin(d,b)}else{const m=await pget('mp:'+hk(tx));if(m!=null){const d=b.querySelector('.tr');d.textContent=m;d.classList.add('ai');fin(d,b)}else rest.push(b)}}blks=rest}
  if(llmOn()&&!hy){
   const nm=provName();setSt('⏳ AI অনুবাদ হচ্ছে ('+nm+')…');
-  try{await gemAll(blks,my);if(my===tok){setSt('✓ AI অনুবাদ ('+nm+')');showTally();aheadPump();setTimeout(syncPage,800)}return}
-  catch(e){const why=gerr(e)+' ['+(e.status||e.message||'?')+']';setSt('⚠ '+why);toast(why,8000);aiFailed=true;for(const b of blks){b.querySelector('.tr').textContent='';b.classList.remove('done')}}
+  try{await gemAll(blks,my);if(my===tok){lastAiFor={key,pos};setSt('✓ AI অনুবাদ ('+nm+')');showTally();aheadPump();setTimeout(syncPage,800)}return}
+  catch(e){const why=gerr(e)+' ['+(e.status||e.message||'?')+']';setSt('⚠ '+why);toast(why,8000);aiFailed=true;lastAiState='fail';for(const b of blks){b.querySelector('.tr').textContent='';b.classList.remove('done')}}
  }else setSt(llmOn()?'⏳ Google দিয়ে দ্রুত অনুবাদ হচ্ছে… (কঠিন অংশ পরে AI দেখবে)':aiBlocked()?'⏸ AI-র ফ্রি কোটা এখন শেষ (চালু হবে '+new Date(qUntil).toLocaleString([],{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})+'), এখন Google Translate চলছে':'Google Translate (AI বন্ধ — 🧠-তে চালু করুন)');
  for(let i=0;i<blks.length&&my===tok;i+=3){
   await Promise.all(blks.slice(i,i+3).map(async b=>{
@@ -774,7 +777,7 @@ async function translateAll(){
  }
  if(llmOn()&&hy&&my===tok)await hybridAI(blks,my);
  if((aiFailed||aiBlocked())&&my===tok)suggestGpt();
- if(my===tok){showTally();aheadPump();setTimeout(syncPage,800)}
+ if(my===tok){lastAiFor={key,pos};showTally();aheadPump();setTimeout(syncPage,800)}
 }
 function toggleTerm(el){
  const m=el.dataset.m,en=el.dataset.en,b=el.dataset.bn||'';
@@ -1005,6 +1008,7 @@ function applyGpt(txt,auto){
   if(tt&&gptJob.snap[idx]!==undefined&&(force||(bn(tt)>0&&bn(tt)>=lat(tt)*0.3))){pset('mp:'+hk(gptJob.snap[idx]),tt);saved.push(tt);ok++}
  });
  if(ok){
+  if(gptJob.key!=null&&gptJob.pos!=null)plDelete(gptJob.key,gptJob.pos);
   termsT.split('\n').forEach(l=>{
    const m=l.replace(/^[\s*\-•\d.)]+/,'').split('=');
    if(m.length>=2){const en=m[0].replace(/[*`"]/g,'').trim(),b=m.slice(1).join('=').replace(/[*`"]/g,'').trim();
@@ -1198,7 +1202,7 @@ $('#bGl').onclick=()=>{
  +'<textarea class="gi" id="cust" rows="8"></textarea>'
  +'<button id="custd">ডিফল্ট (দর্শন) ফিরিয়ে আনুন</button> <button id="custc">খালি করুন</button> <button id="presetb">🕉 দর্শন পরিভাষা প্রিসেট যোগ</button>'
  +'<div style="margin-top:8px"><b>🌐 অনলাইন শব্দকোষ (English = বাংলা)</b><br>যেকোনো খোলা লিংকের .txt / .csv / .json ফাইল দিন, যেখানে প্রতি লাইনে <code>English = বাংলা</code> লেখা। অ্যাপ থেকে এটা এনে শব্দভান্ডারে মিলিয়ে নেবে, সপ্তাহে একবার নিজে হালনাগাদ করবে। নিজের repository-তে <code>glossary-v3.txt</code> তুললে শুধু <code>glossary-v3.txt</code> লিখলেই চলবে।</div>'
- +'<input class="gi" id="glu" placeholder="শব্দকোষের লিংক (যেমন glossary-v3.txt)">'
+ +'<input class="gi" id="glu" placeholder="শব্দকোষের লিংক (যেমন glossary-v3.txt); একাধিক হলে কমা দিয়ে">'
  +'<button id="glf">🌐 এখনই আনুন</button> <span id="glm" style="font-size:13px"></span>'
  +'<div style="margin-top:8px"><b>💬 ChatGPT সেটিং</b></div>'
  +'<select class="gi" id="gmode"><option value="web">ChatGPT খুলবে: ব্রাউজারে</option><option value="app">ChatGPT খুলবে: ChatGPT অ্যাপে (Android)</option></select>'
@@ -1214,7 +1218,7 @@ $('#bGl').onclick=()=>{
  $('#gpst').onclick=()=>openPaste();
  $('#wzgo').onclick=()=>showWiz(1);$('#inst').onclick=openInstall;
  $('#bpi').onclick=()=>{let n=0;Object.entries(bookCtx.terms).forEach(([en,b])=>{if(!gl.some(g=>g.en.toLowerCase()===en)){gl.push(Object.assign(/^keep_?en$/i.test(b)?{en}:{en,bn:b},{rv:true,src:'AI-র শেখা'}));n++}});saveGl();const t=$('#gt');if(t)t.value=gl.map(g=>g.bn?g.en+' = '+g.bn:g.en).join('\n');toast(n+'টি টার্ম শব্দকোষে যোগ হয়েছে',4000)};
- $('#pgre').onclick=()=>{paras.forEach(p=>{const k=pk(p),k2='mp:'+hk(p);pmem.delete(k);kvDel(k);pmem.delete(k2);kvDel(k2)});toast('এই পাতার জমা অনুবাদ মুছেছে, নতুন করে হচ্ছে',4000);sheet.style.display='none';if(book)translateAll()};
+ $('#pgre').onclick=()=>{paras.forEach(p=>{const k=pk(p),k2='mp:'+hk(p);pmem.delete(k);kvDel(k);pmem.delete(k2);kvDel(k2)});plDelete(key,pos);toast('এই পাতার জমা অনুবাদ ও পাতা-লক মুছেছে, নতুন করে হচ্ছে',4000);sheet.style.display='none';if(book)translateAll()};
  $('#vbump').onclick=()=>{gver++;ls.set('gver',String(gver));toast('পরের অনুবাদ থেকে AI সবকিছু নতুন করে করবে (আগের জমা বাদ)',5000)};
  $('#bpr').onclick=()=>{bookCtx={profile:'',terms:{}};glRe=null;if(key)kvSet('bc:'+key,bookCtx);bpShow();toast('প্রোফাইল রিসেট হয়েছে')};
  $('#glu').value=glu;
@@ -1223,7 +1227,7 @@ $('#bGl').onclick=()=>{
   if(!u){m.textContent='আগে লিংক দিন';return}
   m.textContent='⏳ আনা হচ্ছে…';
   try{
-   const r=await loadGloss(u);glu=u;ls.set('glu',u);
+   const r=await loadGlossMany(u);glu=u;ls.set('glu',u);
    m.textContent='✅ '+r.add+'টি নতুন, '+r.upd+'টি হালনাগাদ (ফাইলে মোট '+r.total+'টি)';
    const t=$('#gt');if(t)t.value=gl.map(g=>g.bn?g.en+' = '+g.bn:g.en).join('\n');
    if(book&&auto)translateAll();
@@ -1261,7 +1265,7 @@ $('#bGl').onclick=()=>{
 
 let ilOn=ls.get('il')==='1';
 // ===== পাঠক ও গবেষক আপগ্রেড =====
-let RS={theme:'auto',font:'serif',lh:1.9,w:680,swipe:false,wake:false,ahead:1};
+let RS={theme:'auto',font:'serif',lh:1.9,w:680,swipe:false,wake:false,ahead:3,autolock:true,aheadAI:true};
 try{Object.assign(RS,JSON.parse(ls.get('rs')||'{}'))}catch(e){}
 const saveRS=()=>ls.set('rs',JSON.stringify(RS));
 let findTerm='';
@@ -1314,9 +1318,9 @@ function openTools(){
  sheet.style.display='flex';
  out.innerHTML=`<b>☰ বই-সরঞ্জাম</b><div class="tg" style="margin-top:6px">
  <button id="tsr">🔍 বইয়ে খুঁজুন</button><button id="ttc">📑 সূচিপত্র</button><button id="tbm">🔖 বুকমার্ক</button><button id="thl">🖍 হাইলাইট ও নোট</button>
- <button id="ttt">🎧 শুনুন</button><button id="tgl">📚 শব্দকোষ তালিকা</button><button id="tex">📤 রপ্তানি</button><button id="til">⇆ বাক্য-পাশাপাশি: ${ilOn?'চালু':'বন্ধ'}</button><button id="trs">Aa পড়ার ধরন</button><button id="tsy">🔄 সিঙ্ক রিপোর্ট</button><button id="tin">📲 ইনস্টল পরীক্ষা</button></div><div style="font-size:11px;color:var(--mut);margin-top:6px">সংস্করণ ${APPV}</div>`;
+ <button id="ttt">🎧 শুনুন</button><button id="tgl">📚 শব্দকোষ তালিকা</button><button id="tex">📤 রপ্তানি</button><button id="til">⇆ বাক্য-পাশাপাশি: ${ilOn?'চালু':'বন্ধ'}</button><button id="trs">Aa পড়ার ধরন</button><button id="tpl">🔒 পাতা লক</button><button id="tsy">🔄 সিঙ্ক রিপোর্ট</button><button id="tin">📲 ইনস্টল পরীক্ষা</button></div><div style="font-size:11px;color:var(--mut);margin-top:6px">সংস্করণ ${APPV}</div>`;
  $('#tsr').onclick=openSearch;$('#ttc').onclick=openTOC;$('#tbm').onclick=openBM;$('#thl').onclick=openHL;$('#ttt').onclick=()=>{sheet.style.display='none';ttsStart(0)};
- $('#tgl').onclick=()=>openGL();$('#tex').onclick=openExport;$('#trs').onclick=openRS;$('#tsy').onclick=openSync;$('#tin').onclick=openInstall;
+ $('#tgl').onclick=()=>openGL();$('#tex').onclick=openExport;$('#trs').onclick=openRS;$('#tpl').onclick=openPL;$('#tsy').onclick=openSync;$('#tin').onclick=openInstall;
  $('#til').onclick=()=>{setIL(!ilOn);openTools()};
 }
 $('#sm').onclick=openRS;$('#lg').onclick=openTools;
@@ -1382,7 +1386,7 @@ async function openTOC(){
 // ---- বুকমার্ক
 const bmGet=()=>{try{return JSON.parse(ls.get('bm:'+key)||'[]')}catch(e){return[]}};
 const isBM=()=>bmGet().some(b=>b.pos===pos);
-function markBM(){const t=$('#tot');if(t&&total)t.textContent='/ '+total+(isBM()?' 🔖':'')}
+function markBM(){const t=$('#tot');if(t&&total)t.textContent='/ '+total+(isBM()?' 🔖':'')+(isPageLocked()?' 🔒':'')}
 function openBM(){
  sheet.style.display='flex';
  const draw=()=>{
@@ -1592,11 +1596,12 @@ async function openPM(b){
  $('#ped').onclick=()=>{
   $('#pbx').innerHTML='<textarea class="gi" id="pet" rows="7"></textarea><button class="p" id="pes">সেভ ও লক করুন</button>';
   $('#pet').value=curText(b);
-  $('#pes').onclick=()=>{const t=$('#pet').value.trim();if(!t)return;pset('lk:'+h,{t,mine:true});pset('vf:'+h,{t:Date.now()});applyText(b,t);sheet.style.display='none';toast('✅ আপনার সম্পাদনা লক ও যাচাই হয়েছে')};
+  $('#pes').onclick=()=>{const t=$('#pet').value.trim();if(!t)return;pset('lk:'+h,{t,mine:true});pset('vf:'+h,{t:Date.now()});applyText(b,t);refreshPageLock();sheet.style.display='none';toast('✅ আপনার সম্পাদনা লক ও যাচাই হয়েছে')};
  };
  $('#pre').onclick=()=>{
   if(lk&&lk.t){toast('এটা লক করা, আগে লক খুলুন');return}
   const k=pk(para),k2='mp:'+hk(para);pmem.delete(k);kvDel(k);pmem.delete(k2);kvDel(k2);
+  if(isPageLocked())plDelete(key,pos);
   sheet.style.display='none';toast('নতুন করে অনুবাদ হচ্ছে…');translateAll();
  };
  $('#pcp').onclick=async()=>{const ok=await copyText(curText(b));toast(ok?'কপি হয়েছে':'কপি হয়নি')};
@@ -1611,7 +1616,7 @@ async function openPM(b){
    const c=document.createElement('div');c.style.cssText='border:1px solid var(--bd);border-radius:8px;padding:8px;margin:6px 0';
    const hd=document.createElement('b');hd.textContent=n;const tx=document.createElement('div');tx.style.cssText='white-space:pre-wrap;margin:4px 0';tx.textContent=t;
    c.append(hd,tx);
-   if(!/^\(/.test(t)){const bt=document.createElement('button');bt.textContent='🔒 এটাই রাখুন';bt.onclick=()=>{pset('lk:'+h,{t,mine:false});pset('vf:'+h,{t:Date.now()});applyText(b,t);sheet.style.display='none';toast('✅ এই সংস্করণ লক হয়েছে')};c.append(bt)}
+   if(!/^\(/.test(t)){const bt=document.createElement('button');bt.textContent='🔒 এটাই রাখুন';bt.onclick=()=>{pset('lk:'+h,{t,mine:false});pset('vf:'+h,{t:Date.now()});applyText(b,t);refreshPageLock();sheet.style.display='none';toast('✅ এই সংস্করণ লক হয়েছে')};c.append(bt)}
    box.append(c);
   });
  };
@@ -1659,7 +1664,7 @@ function addGlossUI(en,bnW,ex){
   if(i>=0)gl[i]=ent;else gl.push(ent);
   webKeys.delete(k);ls.set('glwk',JSON.stringify([...webKeys]));
   saveGl();sheet.style.display='none';
-  toast('✅ "'+e+'" শব্দকোষে '+(i>=0?'হালনাগাদ':'যোগ')+' হয়েছে'+(ent.bn?' → '+ent.bn:' (ইংরেজিই থাকবে)'),4500);
+  toast('✅ "'+e+'" শব্দকোষে '+(i>=0?'হালনাগাদ':'যোগ')+' হয়েছে'+(ent.bn?' → '+ent.bn:' (ইংরেজিই থাকবে)')+(isPageLocked()?' — তবে এই পাতা লক করা, এখানে বদলাবে না (পরের পাতায় কাজ করবে)':''),6000);
   if(book&&auto)translateAll();
  };
 }
@@ -1673,7 +1678,7 @@ function openGL(filter,q){
  const total0=list.length;list=list.slice(0,120);
  out.innerHTML=`<b>📚 শব্দকোষ তালিকা</b> <span style="font-size:13px;color:var(--mut)">(${gl.length}টি)</span>
  <input class="gi" id="glq" placeholder="খুঁজুন…" value="${esc(q)}">
- <div class="tg"><button id="gl0">সব</button><button id="gl1">⚠ পর্যালোচনা বাকি (${gl.filter(g=>g.rv).length})</button><button id="gl2">এই বইয়ের</button><button id="gl3">➕ নতুন</button><button id="gl4">✔ সব পর্যালোচিত</button></div><div id="gll" style="margin-top:6px"></div>`;
+ <div class="tg"><button id="gl0">সব</button><button id="gl1">⚠ পর্যালোচনা বাকি (${gl.filter(g=>g.rv).length})</button><button id="gl2">এই বইয়ের</button><button id="gl3">➕ নতুন</button><button id="gl4">✔ সব পর্যালোচিত</button><button id="gl5">📋 অনেক শব্দ একসঙ্গে</button></div><div id="gll" style="margin-top:6px"></div>`;
  const box=$('#gll');
  list.forEach(g=>{
   const d=document.createElement('div');d.style.cssText='padding:7px 0;border-bottom:1px solid var(--bd);cursor:pointer';
@@ -1686,7 +1691,7 @@ function openGL(filter,q){
  if(total0>120){const m=document.createElement('div');m.style.color='var(--mut)';m.textContent='… আরও '+(total0-120)+'টি। খুঁজে বের করুন।';box.append(m)}
  $('#glq').oninput=()=>{clearTimeout(openGL.t);openGL.t=setTimeout(()=>{const v=$('#glq').value;openGL(filter,v);const e=$('#glq');if(e){e.focus();e.setSelectionRange(v.length,v.length)}},350)};
  $('#gl0').onclick=()=>openGL('all',q);$('#gl1').onclick=()=>openGL('rv',q);$('#gl2').onclick=()=>openGL('bk',q);
- $('#gl3').onclick=()=>addGlossUI('','');
+ $('#gl3').onclick=()=>addGlossUI('','');$('#gl5').onclick=openBulk;
  $('#gl4').onclick=()=>{if(!confirm('সব শব্দ ✔ পর্যালোচিত চিহ্নিত করবেন?'))return;gl.forEach(g=>{delete g.rv});saveGl();openGL(filter,q)};
 }
 
@@ -1757,29 +1762,34 @@ function openExport(){
 }
 
 // ===== v3.2: ইনস্টল পরীক্ষা, ধাপে ধাপে আগাম অনুবাদ, সিঙ্ক =====
-const APPV='3.2';
+const APPV='3.3';
 let aheadTok=0,aheadDone={};
 function setAh(t){const e=$('#ah');if(e)e.textContent=t||''}
 async function aheadPump(){
- const N=Math.max(1,RS.ahead||1),my=++aheadTok;
+ const N=Math.max(1,RS.ahead||1),my=++aheadTok,k0=key;
  if(!book||!navigator.onLine||preBusy){setAh('');return}
  const last=Math.min(total-1,pos+N);
  let lastDone=-1;
  for(let p=pos+1;p<=last&&my===aheadTok;p++){
   if(aheadDone[key+':'+p]){lastDone=p;continue}
+  if(pliGet().some(x=>x.pos===p)){aheadDone[key+':'+p]=true;lastDone=p;continue}
   setAh('⏩ আগে থেকে তৈরি হচ্ছে: পাতা '+(p+1)+' (পরের '+N+' পাতার মধ্যে)');
   let ps=[];try{ps=await book.get(p)}catch(e){}
   if(my!==aheadTok)return;
   const hs=await pool(ps,q=>trPara(q,new Set()).catch(()=>''),2);
   if(my!==aheadTok)return;
+  let aiOk=!llmOn()&&!aiBlocked();
   if(RS.aheadAI!==false&&llmOn()&&ps.length){
    try{
     const c0=aiCalls;
     if(hy){const sel=hardSel(ps.map((q,k)=>({q,s:hardScore(q,hs[k]||'')})),hyPct);if(sel.length)await gemTr(sel.map(x=>x.q),3500)}
     else await gemTr(ps,3500);
     if(aiCalls>c0)await sleepMs(gp==='gemini'?5000:1200);
-   }catch(e){}
+    aiOk=true;
+   }catch(e){aiOk=false}
   }
+  if(my!==aheadTok)return;
+  if(RS.autolock!==false&&ps.length&&aiOk&&key===k0&&hs.every(x=>x))await autoLockAhead(k0,p,ps,hs);
   aheadDone[key+':'+p]=true;lastDone=p;
  }
  if(my===aheadTok)setAh(lastDone>pos?'⏩ প্রস্তুত: পাতা '+(pos+2)+'–'+(lastDone+1)+' ✓ (পরের '+N+' পাতা)':'');
@@ -1812,6 +1822,7 @@ async function syncPage(){
  }
  const tl=$('#tl');
  if(tl){const base=tl.textContent.replace(/ · (✓ মিল আছে|⚠ .*)$/,'');tl.textContent=base+(hits?(bad?' · ⚠ '+bad+'টি অনুচ্ছেদে শব্দকোষ মেলেনি (☰ → 🔄 সিঙ্ক)':' · ✓ মিল আছে'):'')}
+ if(!bad)maybeAutoLock();
 }
 async function openSync(){
  sheet.style.display='flex';
@@ -1833,7 +1844,7 @@ async function openSync(){
  });
  const fix=document.createElement('button');fix.className='p';fix.style.marginTop='8px';
  fix.textContent='🔧 মিল নেই এমন '+badBlocks.length+'টি অনুচ্ছেদ আবার করুন';fix.disabled=!badBlocks.length;
- fix.onclick=()=>{badBlocks.forEach(b=>{const p=b.querySelector('.o').textContent,k=pk(p),k2='mp:'+hk(p);pmem.delete(k);kvDel(k);pmem.delete(k2);kvDel(k2)});sheet.style.display='none';toast('শব্দকোষ মেনে নতুন করে অনুবাদ হচ্ছে…');translateAll()};
+ fix.onclick=()=>{badBlocks.forEach(b=>{const p=b.querySelector('.o').textContent,k=pk(p),k2='mp:'+hk(p);pmem.delete(k);kvDel(k);pmem.delete(k2);kvDel(k2)});plDelete(key,pos);sheet.style.display='none';toast('শব্দকোষ মেনে নতুন করে অনুবাদ হচ্ছে…');translateAll()};
  box.append(fix);
  const ex=document.createElement('div');ex.style.cssText='font-size:12px;color:var(--mut);margin-top:10px;line-height:1.6';
  ex.textContent='সিঙ্ক যেভাবে কাজ করে: ১) শব্দকোষ ও AI-র শেখা টার্ম মিলে একটাই "শব্দ-স্মৃতি"। ২) Google, Gemini, ChatGPT তিনজনের কাছেই এই শব্দ নিরাপদ চিহ্নে যায়, ওরা বদলাতে পারে না। ৩) Gemini/ChatGPT নতুন টার্ম শিখলে স্মৃতিতে যায়, পরের Google-অনুবাদেও বসে। ৪) পাতা শেষে মিল-পরীক্ষা হয়; না মিললে ⚠ দেখায়। নিজে সম্পাদনা করা বা লক করা অনুচ্ছেদে আপনার লেখাই প্রধান।';
@@ -1884,6 +1895,171 @@ async function openInstall(){
  }
 }
 
+// ===== v3.3: পাতা-লক (অটো ও ম্যানুয়াল), অধ্যায় লক, নিজের শব্দকোষ =====
+let noNet=false,noNetHits=0,lastAiState='off',lastAiFor=null;
+const pliGetK=k=>{try{return JSON.parse(ls.get('pli:'+k)||'[]')}catch(e){return[]}};
+const pliGet=()=>pliGetK(key);
+function pliSetK(k,pg,auto,on){const a=pliGetK(k).filter(x=>x.pos!==pg);if(on)a.push({pos:pg,auto:!!auto});ls.set('pli:'+k,JSON.stringify(a))}
+const isPageLocked=()=>pliGet().some(x=>x.pos===pos);
+function plDelete(k,pg){const kk='pl:'+k+':'+pg;pmem.delete(kk);kvDel(kk);pliSetK(k,pg,false,false)}
+async function lockPageNow(auto){
+ const blks=[...view.querySelectorAll('.blk')];
+ if(!blks.length||blks.some(b=>!b.classList.contains('done')))return false;
+ const p=[],h=[],ai=[];
+ for(const b of blks){
+  p.push(hk(b.querySelector('.o').textContent));
+  const t=b.querySelector('.tr').cloneNode(true);
+  t.querySelectorAll('.ob,.pm,.pin,.os,.note,.nx').forEach(n=>n.remove());
+  t.querySelectorAll('.w').forEach(w=>w.replaceWith(document.createTextNode(w.textContent)));
+  t.querySelectorAll('[data-base]').forEach(s=>{s.textContent=s.dataset.base;delete s.dataset.open});
+  h.push(t.innerHTML);ai.push(b.querySelector('.tr').classList.contains('ai'));
+ }
+ pset('pl:'+key+':'+pos,{p,h,ai,auto:!!auto,gv:gver,at:Date.now()});
+ pliSetK(key,pos,auto,true);markBM();
+ return true;
+}
+async function applyPageLock(blks){
+ if(!pliGet().some(x=>x.pos===pos))return false;
+ const L=await pget('pl:'+key+':'+pos);
+ if(!L||!Array.isArray(L.p)||L.p.length!==blks.length)return false;
+ if(L.auto&&L.gv!==gver)return false;
+ for(let i=0;i<blks.length;i++)if(hk(blks[i].querySelector('.o').textContent)!==L.p[i])return false;
+ blks.forEach((b,i)=>{const d=b.querySelector('.tr');d.innerHTML=L.h[i];d.classList.toggle('ai',!!L.ai[i]);fin(d,b)});
+ return true;
+}
+async function refreshPageLock(){const li=pliGet().find(x=>x.pos===pos);if(li)await lockPageNow(false)}
+async function maybeAutoLock(){
+ if(RS.autolock===false||!book||isPageLocked())return;
+ if(!lastAiFor||lastAiFor.key!==key||lastAiFor.pos!==pos||lastAiState==='fail')return;
+ const blks=[...view.querySelectorAll('.blk')];
+ if(!blks.length||blks.some(b=>!b.classList.contains('done')||b.dataset.sy==='1'))return;
+ if(blks.some(b=>/⚠ অনুবাদ হয়নি/.test(b.querySelector('.tr').textContent)))return;
+ if(await lockPageNow(true)){const st=$('#st');if(st&&!st.textContent.includes('অটো-লক'))st.textContent+=' · 🔒 অটো-লক'}
+}
+async function autoLockAhead(k0,p,ps,hs){
+ const P=[],H=[],A=[];
+ for(let i=0;i<ps.length;i++){
+  const q=ps[i],hh=hk(q);P.push(hh);
+  const lk=await pget('lk:'+hh);if(lk&&lk.t){H.push(esc(lk.t));A.push(false);continue}
+  const mp=await pget('mp:'+hh);if(mp!=null){H.push(esc(mp));A.push(true);continue}
+  const a=await pget(pk(q));if(a!=null){H.push(esc(a));A.push(true);continue}
+  H.push(hs[i]);A.push(false);
+ }
+ pset('pl:'+k0+':'+p,{p:P,h:H,ai:A,auto:true,gv:gver,at:Date.now()});pliSetK(k0,p,true,true);
+}
+async function lockRange(from,to,prog){
+ let ok=0,skip=0;
+ for(let i=from;i<=to;i++){
+  if(pliGet().some(x=>x.pos===i)){ok++;continue}
+  let ps=[];try{ps=await book.get(i)}catch(e){}
+  if(!ps.length){skip++;continue}
+  noNet=true;noNetHits=0;
+  const p=[],h=[],ai=[];let bad=false;
+  try{
+   for(const q of ps){
+    const hh=hk(q);p.push(hh);
+    const lk=await pget('lk:'+hh);if(lk&&lk.t){h.push(esc(lk.t));ai.push(false);continue}
+    const mp=await pget('mp:'+hh);if(mp!=null){h.push(esc(mp));ai.push(true);continue}
+    const a=await pget(pk(q));if(a!=null){h.push(esc(a));ai.push(true);continue}
+    const g=await trPara(q,new Set());
+    if(noNetHits>0||!g){bad=true;break}
+    h.push(g);ai.push(false);
+   }
+  }catch(e){bad=true}
+  noNet=false;
+  if(bad)skip++;else{pset('pl:'+key+':'+i,{p,h,ai,auto:false,gv:gver,at:Date.now()});pliSetK(key,i,false,true);ok++}
+  if(prog)prog(i-from+1,to-from+1,ok,skip);
+  await sleepMs(0);
+ }
+ markBM();return{ok,skip};
+}
+async function chapterRange(){
+ let t=[];try{t=book.toc?await book.toc():[]}catch(e){}
+ const st=t.map(x=>x.i).filter(x=>x!=null&&x>=0).sort((a,b)=>a-b);
+ if(!st.length)return null;
+ let a=0;for(const x of st){if(x<=pos)a=x}
+ const nx=st.find(x=>x>pos);
+ return{from:a,to:(nx!=null?nx-1:total-1)};
+}
+async function openPL(){
+ sheet.style.display='flex';
+ const locked=isPageLocked(),li=pliGet(),n=li.length,na=li.filter(x=>x.auto).length;
+ out.innerHTML=`<b>🔒 পাতা/অধ্যায় লক</b>
+ <div style="font-size:13px;color:var(--mut);margin:4px 0;line-height:1.6">লক করা পাতা বই বন্ধ করে আবার খুললেও নতুন করে অনুবাদ হয় না, তাই ডেটা, সময় আর AI কোটা বাঁচে। আগে থেকে তৈরি হওয়া পরের পাতাগুলোও সম্পূর্ণ হলে অটো-লক হয়।</div>
+ <div>এই পাতা: <b>${locked?'🔒 লক করা':'🔓 খোলা'}</b> · মোট লক করা পাতা: ${n}টি (অটো ${na}, নিজে ${n-na})</div>
+ <div class="tg" style="margin-top:6px"><button class="p" id="plt">${locked?'🔓 এই পাতার লক খুলুন':'🔒 এই পাতা লক করুন'}</button></div>
+ <label style="display:block;margin:6px 0"><input type="checkbox" id="pla"> পাতা সম্পূর্ণ হলে অটো-লক (Google + AI + শব্দকোষ শেষ হলে)</label>
+ <div style="margin-top:8px"><b>অধ্যায় বা একসঙ্গে অনেক পাতা</b><br>পাতা <input class="gi" id="plf" type="number" min="1" style="width:80px;display:inline-block"> থেকে <input class="gi" id="ple" type="number" min="1" style="width:80px;display:inline-block"> <button id="plc">এই অধ্যায়</button><br><button class="p" id="plr" style="margin-top:6px">🔒 এই পাতাগুলো লক করুন</button><div style="font-size:12px;color:var(--mut)">যা জমা আছে তা-ই লক হয়, নতুন অনুবাদ চালায় না (ইন্টারনেট লাগে না)। জমা নেই এমন পাতা বাদ পড়ে।</div></div>
+ <div style="margin-top:8px"><button id="pua">🔓 সব অটো-লক খুলুন (নতুন শব্দকোষ চালাতে)</button></div><div id="pls" style="font-size:13px;margin-top:6px"></div>`;
+ $('#pla').checked=RS.autolock!==false;$('#plf').value=pos+1;$('#ple').value=pos+1;
+ $('#pla').onchange=()=>{RS.autolock=$('#pla').checked;saveRS()};
+ $('#plt').onclick=async()=>{
+  if(isPageLocked()){plDelete(key,pos);toast('🔓 লক খুলেছে, নতুন করে অনুবাদ হবে');sheet.style.display='none';translateAll()}
+  else{const ok=await lockPageNow(false);if(!ok){toast('পাতার অনুবাদ শেষ হওয়া পর্যন্ত অপেক্ষা করুন, তারপর লক করুন',4500);return}toast('🔒 পাতা লক হয়েছে');openPL()}
+ };
+ $('#plc').onclick=async()=>{const r=await chapterRange();if(!r){$('#pls').textContent='এই বইয়ে সূচি নেই, পাতার নম্বর নিজে লিখুন।';return}$('#plf').value=r.from+1;$('#ple').value=r.to+1;$('#pls').textContent='অধ্যায়: পাতা '+(r.from+1)+'–'+(r.to+1)};
+ $('#plr').onclick=async()=>{
+  const f=Math.max(1,+$('#plf').value||1)-1,t=Math.min(total,+$('#ple').value||total)-1;
+  if(t<f){$('#pls').textContent='পাতার সীমা ঠিক নেই';return}
+  $('#pls').textContent='⏳ লক হচ্ছে…';
+  const r=await lockRange(f,t,(i,n,ok,sk)=>{$('#pls').textContent='⏳ '+i+'/'+n+' (লক '+ok+', বাদ '+sk+')'});
+  $('#pls').textContent='✅ '+r.ok+'টি পাতা লক'+(r.skip?', '+r.skip+'টি বাদ (অনুবাদ জমা নেই, আগে পড়ে নিন বা ⬇ অফলাইন চালান)':'');
+  markBM();
+ };
+ $('#pua').onclick=()=>{
+  const a=pliGet().filter(x=>x.auto);a.forEach(x=>plDelete(key,x.pos));
+  $('#pls').textContent='🔓 '+a.length+'টি অটো-লক খুলেছে। পরের বার ওই পাতা নতুন শব্দকোষ নিয়ে আবার অনুবাদ হবে।';markBM();
+ };
+}
+
+// ---- নিজের শব্দকোষ: একাধিক লিংক, অনেক শব্দ একসঙ্গে, টেমপ্লেট
+async function loadGlossMany(str){
+ const urls=String(str||'').split(/[\s,;]+/).filter(Boolean);
+ if(!urls.length)throw new Error('লিংক নেই');
+ const tot={add:0,upd:0,total:0,errs:[]};
+ for(const u of urls){try{const r=await loadGloss(u);tot.add+=r.add;tot.upd+=r.upd;tot.total+=r.total}catch(e){tot.errs.push(u+': '+(e.message||e))}}
+ if(tot.errs.length===urls.length)throw new Error(tot.errs.join(' | '));
+ return tot;
+}
+const GL_TEMPLATE=`# আমার শব্দকোষ — প্রতি লাইনে একটা: English = বাংলা
+# # দিয়ে শুরু লাইন মন্তব্য, অ্যাপ পড়ে না। বাংলার পাশে বন্ধনীতে মূল শব্দ দিতে পারেন।
+# ইংরেজিই রাখতে চাইলে বাংলার জায়গায় KEEP_EN লিখুন।
+# নিচের লাইনটা থাকলে এই ফাইলের সব শব্দ "যাচাই করা" ধরা হবে (পর্যালোচনা বাকি চিহ্ন পড়বে না):
+# trusted
+# উদাহরণ (মুছে নিজেরগুলো লিখুন):
+Great Perfection = মহা পরিপূর্ণতা (Great Perfection)
+Rigpa = রিগপা (Rigpa)
+Mahamudra = KEEP_EN
+`;
+function openBulk(){
+ sheet.style.display='flex';
+ out.innerHTML=`<b>📋 অনেক শব্দ একসঙ্গে</b><div style="font-size:13px;color:var(--mut);margin:4px 0">প্রতি লাইনে <code>English = বাংলা</code> (CSV বা ট্যাব দিয়েও চলে)। বাংলার জায়গায় KEEP_EN লিখলে শব্দটা ইংরেজিই থাকবে।</div>
+ <textarea class="gi" id="bkt" rows="8" placeholder="Great Perfection = মহা পরিপূর্ণতা&#10;Rigpa = রিগপা"></textarea>
+ <label style="display:block;margin:5px 0"><input type="checkbox" id="bkb" checked> বাংলার পাশে বন্ধনীতে ইংরেজি দেখাও</label>
+ <label style="display:block;margin:5px 0"><input type="checkbox" id="bkr" checked> ✔ আমি যাচাই করেছি (পর্যালোচনা বাকি নয়)</label>
+ <button class="p" id="bka">যোগ করুন</button> <button id="bkd">📥 খালি টেমপ্লেট নামান</button> <button id="bkc">বাতিল</button><div id="bks" style="margin-top:6px;font-size:13px"></div>
+ <div style="font-size:12px;color:var(--mut);margin-top:8px;line-height:1.6">নিজের ফাইল থেকে নিতে চাইলে: টেমপ্লেট নামিয়ে ভরে GitHub repository-তে (যেমন my-glossary.txt নামে) তুলুন, তারপর সেটিংসের শব্দকোষ-লিংক ঘরে <b>glossary-v3.txt, my-glossary.txt</b> এভাবে কমা দিয়ে লিখে আনুন।</div>`;
+ $('#bkc').onclick=()=>openGL();
+ $('#bkd').onclick=()=>{dl('my-glossary.txt',GL_TEMPLATE);$('#bks').textContent='✅ my-glossary.txt নামছে'};
+ $('#bka').onclick=()=>{
+  const list=parseGloss($('#bkt').value);
+  if(!list.length){$('#bks').textContent='কোনো "English = বাংলা" লাইন পাইনি';return}
+  let add=0,upd=0;
+  list.forEach(([en,b])=>{
+   const keep=/^keep_?en$/i.test(b);
+   const ent={en};
+   if(!keep)ent.bn=($('#bkb').checked&&!b.includes('('))?b+' ('+en+')':b;
+   if(!$('#bkr').checked)ent.rv=true;
+   const k=normK(en),i=gl.findIndex(g=>normK(g.en)===k);
+   if(i>=0){const o=gl[i];['orig','def','src','bk'].forEach(f=>{if(o[f]!==undefined)ent[f]=o[f]});gl[i]=ent;upd++}else{gl.push(ent);add++}
+   webKeys.delete(k);
+  });
+  ls.set('glwk',JSON.stringify([...webKeys]));saveGl();
+  $('#bks').textContent='✅ '+add+'টি নতুন, '+upd+'টি হালনাগাদ'+(isPageLocked()?' (এই পাতা লক করা, এখানে বদলাবে না)':'');
+  if(book&&auto)translateAll();
+ };
+}
+
 const WZ=5;
 function wzNav(n){return `<div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap">${n>1?'<button id="wzb">◀ পিছনে</button>':''}<button class="p" id="wzn">${n<WZ?'পরের ধাপ ▶':'✅ শেষ করুন'}</button><button id="wzs">পরে করব</button></div>`}
 function wzSave(n){
@@ -1910,7 +2086,7 @@ function showWiz(n){
   const u=$('#wgu').value.trim(),r=$('#wgr');
   if(!u){r.textContent='আগে লিংক দিন';return}
   r.textContent='⏳ আনা হচ্ছে…';
-  try{const x=await loadGloss(u);glu=u;ls.set('glu',u);r.textContent='✅ '+x.add+'টি নতুন, '+x.upd+'টি হালনাগাদ (ফাইলে মোট '+x.total+'টি)'}
+  try{const x=await loadGlossMany(u);glu=u;ls.set('glu',u);r.textContent='✅ '+x.add+'টি নতুন, '+x.upd+'টি হালনাগাদ (ফাইলে মোট '+x.total+'টি)'}
   catch(e){r.textContent='❌ আনা যায়নি: '+(e.message||e)+'। ফাইলটা repository-তে তোলা আছে কি না দেখুন, না থাকলে এই ধাপ বাদ দিন।'}
  }}
  if(n===3){$('#wct').value=(cust.trim()||DEF_CUST);$('#wgm').value=ls.get('gmode')||'web';$('#wcc').onclick=async()=>{const ok=await copyText($('#wct').value);toast(ok?'✅ কপি হয়েছে। এবার ChatGPT-র Custom instructions-এ পেস্ট করুন':'কপি হয়নি, ঘর থেকে নিজে কপি করুন',5000)}}
@@ -1923,6 +2099,6 @@ if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol))navigator.s
 try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}
 showLib();applyRS();
 if(ls.get('wzdone')!=='1'&&!gk)setTimeout(()=>showWiz(1),700);
-if(glu&&navigator.onLine&&Date.now()-glt>7*864e5)loadGloss(glu).then(r=>{if(r.add||r.upd)toast('অনলাইন শব্দকোষ হালনাগাদ: '+r.add+'টি নতুন',4000)}).catch(()=>{});
+if(glu&&navigator.onLine&&Date.now()-glt>7*864e5)loadGlossMany(glu).then(r=>{if(r.add||r.upd)toast('অনলাইন শব্দকোষ হালনাগাদ: '+r.add+'টি নতুন',4000)}).catch(()=>{});
 </script>
 </body></html>

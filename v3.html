@@ -43,7 +43,7 @@ label.b{position:relative;overflow:hidden}
 #ttsb{position:fixed;left:8px;right:8px;bottom:calc(66px + env(safe-area-inset-bottom,0px));background:var(--card);border:1px solid var(--ac);border-radius:12px;padding:6px 10px;display:none;align-items:center;gap:8px;z-index:8;flex-wrap:wrap}
 </style></head><body>
 <header>
- <label class="b p">📂<input id="file" type="file"></label><button id="bLib">📚</button>
+ <label class="b p">📂<input id="file" type="file"></label><button id="bLib">📚</button><button id="bWeb" class="p">🔗</button><button id="bPaste" class="p">📝</button>
  <button id="prev" disabled>◀</button><input id="pg" type="number" min="1" value="1" disabled><span id="tot"></span><button id="next" disabled>▶</button>
  <span class="sp"></span><button id="sm">Aa</button><button id="lg">☰</button>
 </header>
@@ -178,13 +178,26 @@ async function openEpub(buf){
 }
 
 const lib=()=>{try{return JSON.parse(ls.get('lib')||'[]')}catch(e){return[]}};
+let lastWebUrl='';
+async function getSaved(x){
+ let buf=await kvGet('bk:'+x.k);
+ if(!buf&&/^web:/.test(x.name)){try{const t=localStorage.getItem('wb:'+x.k);if(t)buf=new TextEncoder().encode(t).buffer}catch(e){}}
+ return buf||null;
+}
 async function openBuf(name,size,buf,save){
  view.className='';view.innerHTML='<div class="hello">লোড হচ্ছে…</div>';
  const k='pos:'+name+size;
  try{
-  if(save){kvSet('bk:'+k,buf);const l=lib().filter(x=>x.k!==k);l.unshift({k,name,size});ls.set('lib',JSON.stringify(l.slice(0,30)))}
-  book=/\.epub$/i.test(name)?await openEpub(buf.slice(0)):await openPdf(buf.slice(0));
-  total=book.n;key=k;gPrev='';bookCtx=(await kvGet('bc:'+k))||{profile:'',terms:{}};glRe=null;
+  if(save){
+   let ok=false;
+   try{await kvSet('bk:'+k,buf);ok=!!(await kvGet('bk:'+k))}catch(e){}
+   const isW=/^web:/.test(name);
+   if(!ok&&isW){try{localStorage.setItem('wb:'+k,new TextDecoder().decode(buf));ok=true}catch(e){}}
+   const l=lib().filter(x=>x.k!==k);l.unshift({k,name,size,u:isW?lastWebUrl:''});ls.set('lib',JSON.stringify(l.slice(0,30)));
+   toast(ok?'✓ তাকে 📚 সেভ হয়েছে, পরে এখান থেকেই পড়ুন':'⚠ সেভ হয়নি, ব্রাউজারের স্টোরেজ বন্ধ বা ভরা',4000);
+  }
+  book=/^web:/.test(name)?openWebBook(buf):/\.epub$/i.test(name)?await openEpub(buf.slice(0)):await openPdf(buf.slice(0));
+  total=book.n;key=k;ls.set('last',k);gPrev='';bookCtx=(await kvGet('bc:'+k))||{profile:'',terms:{}};glRe=null;
   pos=Math.min(Math.max(+ls.get(key)||0,0),total-1);
   $('#tot').textContent='/ '+total;
   ['prev','next','pg','bTerm','bAuto'].forEach(i=>$('#'+i).disabled=false);
@@ -202,15 +215,189 @@ function showLib(){
  l.forEach(x=>{
   const r=document.createElement('div');r.style.cssText='display:flex;gap:6px;margin:8px 0';
   const b=document.createElement('button');b.style.cssText='flex:1;text-align:left';
-  b.textContent='📖 '+x.name+' (পাতা '+((+ls.get(x.k)||0)+1)+')';
-  b.onclick=async()=>{const buf=await kvGet('bk:'+x.k);if(!buf){toast('বইটি পাওয়া যায়নি, আবার খুলুন');return}openBuf(x.name,x.size,buf,false)};
+  b.textContent=(/^web:/.test(x.name)?'🔗 '+x.name.slice(4):'📖 '+x.name)+' (পাতা '+((+ls.get(x.k)||0)+1)+')';
+  b.onclick=async()=>{const buf=await getSaved(x);if(!buf){if(x.u){toast('আবার আনা হচ্ছে…');openWeb(x.u);return}toast('বইটি পাওয়া যায়নি, আবার খুলুন');return}openBuf(x.name,x.size,buf,false)};
   const d=document.createElement('button');d.textContent='🗑';
-  d.onclick=()=>{if(!confirm('"'+x.name+'" তাক থেকে সরাবেন?'))return;kvDel('bk:'+x.k);ls.set('lib',JSON.stringify(lib().filter(y=>y.k!==x.k)));showLib()};
+  d.onclick=()=>{if(!confirm('"'+x.name+'" তাক থেকে সরাবেন?'))return;kvDel('bk:'+x.k);try{localStorage.removeItem('wb:'+x.k)}catch(e){}ls.set('lib',JSON.stringify(lib().filter(y=>y.k!==x.k)));showLib()};
   r.append(b,d);view.append(r);
  });
  const wbtn=document.createElement('button');wbtn.textContent='🧭 সেটআপ গাইড';wbtn.style.marginTop='14px';wbtn.onclick=()=>showWiz(1);view.append(wbtn);const ibt=document.createElement('button');ibt.textContent='📲 ইনস্টল পরীক্ষা';ibt.style.cssText='margin:14px 0 0 6px';ibt.onclick=openInstall;view.append(ibt);
 }
 $('#bLib').onclick=showLib;
+function openWebBook(buf){
+ const j=JSON.parse(new TextDecoder().decode(buf));
+ return{n:j.pages.length,async toc(){return j.pages.map((p,i)=>({t:(p[0]||'').slice(0,60),i,l:0}))},async get(i){return j.pages[i]||[]}};
+}
+function webParas(h){
+ const doc=new DOMParser().parseFromString(h,'text/html');
+ doc.querySelectorAll('script,style,noscript,nav,footer,aside,form,svg,iframe,button,select,[hidden],[aria-hidden="true"]').forEach(n=>n.remove());
+ const root=doc.querySelector('article')||doc.querySelector('main')||doc.body;
+ const Q='h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,figcaption,td';
+ const a=[...root.querySelectorAll(Q)].filter(e=>!e.querySelector(Q)).map(e=>e.textContent.replace(/\s+/g,' ').trim()).filter(t=>t.length>1);
+ const out=[];a.forEach(t=>{if(out[out.length-1]!==t)out.push(t)});
+ return{title:(doc.title||'').trim(),paras:out};
+}
+function mdParas(m){
+ let title='';const t=m.match(/^Title:\s*(.+)$/m);if(t)title=t[1].trim();
+ const i=m.indexOf('Markdown Content:');if(i>=0)m=m.slice(i+17);
+ const out=m.split(/\n\s*\n/).map(x=>x.replace(/!\[[^\]]*\]\([^)]*\)/g,'').replace(/\[([^\]]*)\]\([^)]*\)/g,'$1').replace(/^[#>*\-\s\d.]+/,'').replace(/[*_`]/g,'').replace(/\s+/g,' ').trim()).filter(x=>x.length>1);
+ return{title,paras:out};
+}
+async function getWeb(u){
+ const px=[x=>'https://api.allorigins.win/raw?url='+encodeURIComponent(x),x=>'https://corsproxy.io/?url='+encodeURIComponent(x)];
+ for(const p of px){
+  try{const r=await fetch(p(u));if(!r.ok)continue;const h=await r.text();if(h&&h.length>300){const w=webParas(h);if(w.paras.length>2)return w}}catch(e){}
+ }
+ try{const r=await fetch('https://r.jina.ai/'+u);if(r.ok){const w=mdParas(await r.text());if(w.paras.length>0)return w}}catch(e){}
+ return null;
+}
+function webFinish(u,title,host,paras,per){
+ lastWebUrl=u||'';
+ const pages=[];let cur=[],n=0;
+ paras.forEach(p=>{cur.push(p);n+=p.length;if(n>(per||2200)){pages.push(cur);cur=[];n=0}});
+ if(cur.length)pages.push(cur);
+ const name='web:'+(title||host).slice(0,60)+' ('+host+')';
+ const buf=new TextEncoder().encode(JSON.stringify({url:u,pages})).buffer;
+ openBuf(name,buf.byteLength,buf,true);
+}
+const ytId=u=>{const m=u.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|live\/|v\/))([\w-]{11})/i);return m?m[1]:null};
+async function viaProxy(u,opt){
+ const px=[x=>'https://corsproxy.io/?url='+encodeURIComponent(x),x=>'https://api.allorigins.win/raw?url='+encodeURIComponent(x)];
+ for(const p of px){try{const r=await fetch(p(u),opt);if(r.ok){const t=await r.text();if(t&&t.length>20)return t}}catch(e){}}
+ return null;
+}
+function pickTrack(tr){
+ if(!tr||!tr.length)return null;
+ const pr=t=>(t.kind!=='asr'?0:10)+(/^en/.test(t.languageCode)?0:1);
+ return [...tr].sort((a,b)=>pr(a)-pr(b))[0];
+}
+async function ytTracks(id){
+ const h=await viaProxy('https://www.youtube.com/watch?v='+id+'&hl=en');
+ if(h){const m=h.match(/"captionTracks":(\[.*?\])(?:,"audioTracks"|,"translationLanguages"|\})/);if(m){try{const t=JSON.parse(m[1]);if(t.length)return t}catch(e){}}}
+ const body=JSON.stringify({context:{client:{clientName:'ANDROID',clientVersion:'19.09.37',androidSdkVersion:30,hl:'en'}},videoId:id});
+ const j=await viaProxy('https://www.youtube.com/youtubei/v1/player?prettyPrint=false',{method:'POST',headers:{'Content-Type':'application/json'},body});
+ if(j){try{const t=JSON.parse(j).captions?.playerCaptionsTracklistRenderer?.captionTracks;if(t&&t.length)return t}catch(e){}}
+ return null;
+}
+async function ytText(tk){
+ let x=await viaProxy(tk.baseUrl+'&fmt=json3');
+ if(x){try{const j=JSON.parse(x);const o=[];(j.events||[]).forEach(e=>{if(e.segs)o.push(e.segs.map(g=>g.utf8||'').join(''))});if(o.join('').trim())return o.map(z=>z.replace(/\s+/g,' ').trim()).filter(Boolean)}catch(e){}}
+ x=await viaProxy(tk.baseUrl);
+ if(x){const d=new DOMParser().parseFromString(x,'text/xml');const o=[...d.querySelectorAll('text,p')].map(n=>n.textContent.replace(/\s+/g,' ').trim()).filter(Boolean);if(o.length)return o}
+ return null;
+}
+const dcode=t=>{const e=document.createElement('textarea');e.innerHTML=t;return e.value};
+async function ytApi(id,key){
+ const H={headers:{Authorization:'Bearer '+key}},B='https://getyoutubetranscript.com/api/v1/';
+ const get=async l=>{const r=await fetch(B+'transcript?timestamps=true&v='+id+(l?'&language='+l:''),H);let j=null;try{j=await r.json()}catch(e){}return{s:r.status,j}};
+ try{
+  let x=await get('');
+  if(x.s===401){toast('API কী ঠিক নয়',5000);return null}
+  if(x.s===402||(x.j&&x.j.code==='PAYMENT_REQUIRED')){toast('API-র ফ্রি ক্রেডিট শেষ',5000);return null}
+  if(x.s===404){const l=await fetch(B+'transcript/languages?v='+id,H);if(l.ok){const lj=await l.json();const c=lj.data&&lj.data.default_language_code;if(c)x=await get(c)}}
+  const d=x.j&&x.j.data;if(!d)return null;
+  if(d.segments&&d.segments.length)return d.segments.map(g=>dcode(g.text||'').replace(/\s+/g,' ').trim()).filter(Boolean);
+  if(d.transcript)return dcode(d.transcript).split(/(?<=[.!?।])\s+/).filter(Boolean);
+ }catch(e){}
+ return null;
+}
+function ytParas(lines){
+ const out=[];let cur='';
+ for(const l of lines){cur+=(cur?' ':'')+l;if(cur.length>=450&&/[.!?।…"”)]$/.test(cur)||cur.length>=700){out.push(cur);cur=''}}
+ if(cur)out.push(cur);
+ return out;
+}
+function cleanPasted(t){
+ const lines=t.split(/\n/).map(x=>x.trim()).filter(x=>x&&!/^\d{1,2}(:\d{2}){1,2}$/.test(x));
+ return ytParas(lines);
+}
+let ytErr='';
+async function ytGemini(id){
+ const key=gk;if(!key)return null;
+ const prompt='Transcribe all the speech in this video exactly as spoken, in the ORIGINAL language of the video. Do NOT translate. Output plain text only, grouped into natural paragraphs separated by blank lines. No timestamps, no speaker labels, no headings, no commentary. If there is no speech, transcribe the readable on-screen text instead.';
+ const ms=[...new Set([gm||'gemini-2.5-flash','gemini-2.5-flash'])];
+ for(const m of ms){
+  const ac=new AbortController(),to=setTimeout(()=>ac.abort(),480000);
+  const gc={temperature:0.2,maxOutputTokens:65536};
+  if(/^gemini-2\.5-flash/.test(m))gc.thinkingConfig={thinkingBudget:0};
+  try{
+   const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+m+':generateContent?key='+encodeURIComponent(key),{method:'POST',signal:ac.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{file_data:{file_uri:'https://www.youtube.com/watch?v='+id}},{text:prompt}]}],generationConfig:gc})});
+   const j=await r.json().catch(()=>null);
+   if(!r.ok){ytErr=(j&&j.error&&j.error.message)||('HTTP '+r.status);if(r.status===429||r.status===404||r.status===503)continue;break}
+   const c=j.candidates&&j.candidates[0];
+   const t=c&&c.content&&c.content.parts?c.content.parts.map(p=>p.text||'').join(''):'';
+   if(t.trim()){if(c.finishReason==='MAX_TOKENS')toast('ভিডিও অনেক লম্বা, শুরুর অংশ আনা হয়েছে',5000);return t}
+   ytErr='Gemini কিছু ফেরত দেয়নি';
+  }catch(e){ytErr=String(e.message||e)}finally{clearTimeout(to)}
+ }
+ return null;
+}
+function gemParas(t){
+ t=t.replace(/\*\*|__|`/g,'').replace(/^#+\s*/gm,'');
+ let p=t.split(/\n\s*\n/).map(x=>x.replace(/\s+/g,' ').trim()).filter(Boolean);
+ if(p.length<3&&t.length>1500)p=ytParas(t.split(/(?<=[.!?।。])\s+/));
+ const o=[];p.forEach(x=>{if(x.length<=900)o.push(x);else o.push(...ytParas(x.split(/(?<=[.!?।。])\s+/)))});
+ return o;
+}
+function askTranscript(u,host,title){
+ const w=document.createElement('div');w.style.cssText='position:fixed;inset:0;background:#000a;z-index:50;display:flex;align-items:center;justify-content:center;padding:14px;overflow:auto';
+ w.innerHTML='<div style="background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:12px;padding:14px;width:100%;max-width:560px"><div style="font-size:14px;line-height:1.6;margin-bottom:8px">'+(ytErr?'<div style="color:var(--ac);font-size:12px;margin-bottom:6px;word-break:break-word">'+esc(ytErr.slice(0,200))+'</div>':'')+'<b>সবচেয়ে সহজ (ফ্রি):</b> Gemini কী দিন। <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="color:var(--ac)">aistudio.google.com/apikey</a> থেকে কী নিন। Gemini ভিডিওটা নিজেই শুনে লিখে দেবে, ক্যাপশন না থাকলেও চলবে।<div style="display:flex;gap:6px;margin:6px 0"><input id="ytk" placeholder="AIza..." style="flex:1;font:inherit;font-size:14px;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:6px"><button id="ytks" class="p">সেভ ও চালান</button></div><b>অথবা:</b> ইউটিউবে ভিডিওর নিচে <b>…আরও → ট্রান্সক্রিপ্ট দেখান</b> থেকে লেখা কপি করে নিচে পেস্ট করুন।</div><textarea id="ytp" style="width:100%;height:30vh;font:inherit;font-size:14px;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:8px"></textarea><div style="display:flex;gap:8px;margin-top:8px"><button id="ytop">▶ ইউটিউবে খুলুন</button><button id="ytcb">📋 পেস্ট</button></div><div style="display:flex;gap:8px;margin-top:8px"><button class="p" id="ytok" style="flex:1">অনুবাদ করুন</button><button id="ytno">বাতিল</button></div></div>';
+ document.body.append(w);
+ w.querySelector('#ytk').value=gk||'';
+ w.querySelector('#ytks').onclick=()=>{const v=w.querySelector('#ytk').value.trim();if(!v){toast('কী লিখুন');return}gk=v;ls.set('gk',v);w.remove();const id=ytId(u);if(id)openYT(u,id)};
+ w.querySelector('#ytop').onclick=()=>window.open(u,'_blank');
+ w.querySelector('#ytcb').onclick=async()=>{try{const t=await navigator.clipboard.readText();if(!t||t.length<20){toast('ক্লিপবোর্ডে ট্রান্সক্রিপ্ট নেই');return}w.querySelector('#ytp').value=t;toast('পেস্ট হয়েছে, এবার অনুবাদ চাপুন')}catch(e){toast('পেস্ট করতে ঘরে চেপে ধরে Paste দিন',4000)}};
+ w.querySelector('#ytno').onclick=()=>{w.remove();showLib()};
+ w.querySelector('#ytok').onclick=()=>{const p=cleanPasted(w.querySelector('#ytp').value);if(!p.length){toast('কিছু পেস্ট করা হয়নি');return}w.remove();webFinish(u,title,host,p,2600)};
+}
+async function openYT(u,id){
+ ytErr='';
+ view.className='';view.innerHTML='<div class="hello">▶ ইউটিউব ট্রান্সক্রিপ্ট আনা হচ্ছে…</div>';
+ let title='YouTube '+id;
+ try{const r=await fetch('https://www.youtube.com/oembed?format=json&url='+encodeURIComponent('https://www.youtube.com/watch?v='+id));if(r.ok){const j=await r.json();if(j.title)title='▶ '+j.title}}catch(e){}
+ if(gk){
+  view.innerHTML='<div class="hello">▶ Gemini ভিডিওটা শুনে লিখছে…<br>লম্বা ভিডিওতে ১–৩ মিনিট লাগতে পারে, অ্যাপ খোলা রাখুন।</div>';
+  const t=await ytGemini(id);
+  if(t){const P=gemParas(t);if(P.length){webFinish(u,title,'youtube · Gemini',P,2600);return}}
+ }
+ view.innerHTML='<div class="hello">▶ ক্যাপশন খোঁজা হচ্ছে…</div>';
+ const tr=await ytTracks(id),tk=pickTrack(tr);
+ const lines=tk?await ytText(tk):null;
+ if(lines&&lines.length){webFinish(u,title,'youtube'+(tk.kind==='asr'?' · অটো-ক্যাপশন':''),ytParas(lines),2600);return}
+ askTranscript(u,'youtube',title);
+}
+async function openWeb(u){
+ u=(u||'').trim();if(!u)return;
+ if(!/^https?:\/\//i.test(u))u='https://'+u;
+ {const id=ytId(u);if(id)return openYT(u,id)}
+ let host='';try{host=new URL(u).hostname.replace(/^www\./,'')}catch(e){toast('লিংকটা ঠিক নয়');return}
+ view.className='';view.innerHTML='<div class="hello">🔗 ওয়েবসাইট আনা হচ্ছে…<br>'+host+'</div>';
+ const w=await getWeb(u);
+ if(!w){view.innerHTML='<div class="hello">এই সাইট থেকে লেখা আনা যায়নি (সাইটটি আটকে দিয়েছে বা ইন্টারনেট নেই)। অন্য লিংক চেষ্টা করুন।</div>';return}
+ webFinish(u,w.title,host,w.paras);
+}
+function pasteParas(t){
+ t=t.replace(/\r/g,'');
+ const chunks=t.split(/\n\s*\n/).map(x=>x.split('\n').filter(l=>!/^\s*\d{1,2}(:\d{2}){1,2}\s*$/.test(l)).join(' ').replace(/\s+/g,' ').trim()).filter(Boolean);
+ if(chunks.length>=3&&chunks.join('').length/chunks.length>80){const o=[];chunks.forEach(x=>{if(x.length<=900)o.push(x);else o.push(...ytParas(x.split(/(?<=[.!?।。])\s+/)))});return o}
+ return cleanPasted(t);
+}
+function askPaste(){
+ const w=document.createElement('div');w.style.cssText='position:fixed;inset:0;background:#000a;z-index:50;display:flex;align-items:center;justify-content:center;padding:14px;overflow:auto';
+ w.innerHTML='<div style="background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:12px;padding:14px;width:100%;max-width:560px"><div style="font-size:14px;line-height:1.6;margin-bottom:8px"><b>📝 যেকোনো লেখা/ট্রান্সক্রিপ্ট পেস্ট করুন</b> (যেকোনো ভাষা)। বাংলায় অনুবাদ হবে, আর 📚 তাকে সেভ থাকবে, পরে এসে পড়তে পারবেন।</div><input id="ptt" placeholder="নাম (ঐচ্ছিক), যেমন: ইউটিউব ভিডিও ১" style="width:100%;font:inherit;font-size:14px;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:6px;margin-bottom:6px"><textarea id="ptx" style="width:100%;height:40vh;font:inherit;font-size:14px;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:8px"></textarea><div style="display:flex;gap:8px;margin-top:8px"><button id="ptc">📋 পেস্ট</button><button class="p" id="pto" style="flex:1">অনুবাদ ও সেভ</button><button id="ptn">বাতিল</button></div></div>';
+ document.body.append(w);
+ w.querySelector('#ptc').onclick=async()=>{try{const t=await navigator.clipboard.readText();if(!t){toast('ক্লিপবোর্ড খালি');return}w.querySelector('#ptx').value=t}catch(e){toast('ঘরে চেপে ধরে Paste দিন',4000)}};
+ w.querySelector('#ptn').onclick=()=>w.remove();
+ w.querySelector('#pto').onclick=()=>{
+  const t=w.querySelector('#ptx').value;const p=pasteParas(t);
+  if(!p.length){toast('কিছু পেস্ট করা হয়নি');return}
+  const ti=(w.querySelector('#ptt').value.trim()||t.trim().replace(/\s+/g,' ').slice(0,40));
+  w.remove();webFinish('',ti,'পেস্ট',p,2600);
+ };
+}
+$('#bPaste').onclick=askPaste;
+$('#bWeb').onclick=()=>{const u=prompt('ওয়েবসাইট বা ইউটিউব ভিডিওর লিংক দিন (যেকোনো ভাষা, বাংলায় অনুবাদ হবে):','');if(u)openWeb(u)};
+
 async function show(){
  view.innerHTML='';sheet.style.display='none';
  try{paras=await book.get(pos)}catch(e){paras=[]}
@@ -2097,7 +2284,7 @@ function showWiz(n){
 }
 if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol))navigator.serviceWorker.register('sw3.js',{scope:'./'}).catch(()=>{});
 try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}
-showLib();applyRS();
+(async()=>{try{const e=lib().find(x=>x.k===ls.get('last'));if(e){const b=await getSaved(e);if(b){openBuf(e.name,e.size,b,false);return}}}catch(_){}showLib()})();applyRS();
 if(ls.get('wzdone')!=='1'&&!gk)setTimeout(()=>showWiz(1),700);
 if(glu&&navigator.onLine&&Date.now()-glt>7*864e5)loadGlossMany(glu).then(r=>{if(r.add||r.upd)toast('অনলাইন শব্দকোষ হালনাগাদ: '+r.add+'টি নতুন',4000)}).catch(()=>{});
 </script>

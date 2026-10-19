@@ -178,6 +178,12 @@ async function openEpub(buf){
 }
 
 const lib=()=>{try{return JSON.parse(ls.get('lib')||'[]')}catch(e){return[]}};
+async function autoPre(from){
+ for(let i=0;i<60&&preBusy;i++)await sleepMs(1000);
+ if(preBusy||!book||!navigator.onLine)return;
+ preBusy=true;ls.set('preon:'+key,'1');wlOn();preUi('⬇ পড়ার সাথে সাথে অটো অনুবাদ চলছে…',0);
+ try{await preRunInner(from)}finally{preBusy=false;wlOff();preUi('',null)}
+}
 let lastWebUrl='';
 async function getSaved(x){
  let buf=await kvGet('bk:'+x.k);
@@ -185,6 +191,7 @@ async function getSaved(x){
  return buf||null;
 }
 async function openBuf(name,size,buf,save){
+ if(preBusy&&('pos:'+name+size)!==key)preStop=true;
  view.className='';view.innerHTML='<div class="hello">লোড হচ্ছে…</div>';
  const k='pos:'+name+size;
  try{
@@ -202,7 +209,11 @@ async function openBuf(name,size,buf,save){
   $('#tot').textContent='/ '+total;
   ['prev','next','pg','bTerm','bAuto'].forEach(i=>$('#'+i).disabled=false);
   show();
-  if(ls.get('preon:'+k)==='1'&&!preBusy)toast('⬇ অফলাইন প্রস্তুতি অসম্পূর্ণ (পাতা '+((+ls.get('pre:'+k)||0)+1)+'/'+total+' পর্যন্ত হয়েছে)। ⬇ চাপলে আপনার বর্তমান পাতা থেকে এগোবে।',6000);
+  if(/^web:/.test(name)&&ls.get('autoprep')!=='0'&&total>1){
+   if(save)setTimeout(()=>autoPre(1),2500);
+   else if(ls.get('preon:'+k)==='1'&&!preBusy)setTimeout(()=>autoPre(Math.min(total-1,Math.max(0,+ls.get('pre:'+k)||0))),2500);
+  }
+  if(ls.get('preon:'+k)==='1'&&!preBusy&&!/^web:/.test(name))toast('⬇ অফলাইন প্রস্তুতি অসম্পূর্ণ (পাতা '+((+ls.get('pre:'+k)||0)+1)+'/'+total+' পর্যন্ত হয়েছে)। ⬇ চাপলে আপনার বর্তমান পাতা থেকে এগোবে।',6000);
  }catch(err){view.innerHTML='<div class="hello">বইটি খোলা যায়নি। অন্য ফাইল চেষ্টা করুন।</div>'}
 }
 $('#file').onchange=async e=>{
@@ -251,8 +262,28 @@ async function getWeb(u){
  try{const r=await fetch('https://r.jina.ai/'+u);if(r.ok){const w=mdParas(await r.text());if(w.paras.length>0)return w}}catch(e){}
  return null;
 }
+function splitText(t,max){
+ max=max||650;t=t.replace(/\s+/g,' ').trim();
+ if(t.length<=max)return t?[t]:[];
+ const sents=t.split(/(?<=[.!?।。؟])\s+/),out=[];let cur='';
+ const push=()=>{if(cur){out.push(cur);cur=''}};
+ for(let s of sents){
+  while(s.length>max){
+   let cut=s.lastIndexOf(' ',max);if(cut<max*0.5)cut=max;
+   const head=s.slice(0,cut).trim();s=s.slice(cut).trim();
+   if(cur&&cur.length+head.length+1<=max)cur+=' '+head;else{push();cur=head}
+   push();
+  }
+  if(!s)continue;
+  if(cur&&cur.length+s.length+1>max)push();
+  cur+=(cur?' ':'')+s;
+ }
+ push();return out;
+}
 function webFinish(u,title,host,paras,per){
  lastWebUrl=u||'';
+ paras=paras.flatMap(p=>p.length>900?splitText(p,650):[p]);
+ per=Math.min(per||2200,2200);
  const pages=[];let cur=[],n=0;
  paras.forEach(p=>{cur.push(p);n+=p.length;if(n>(per||2200)){pages.push(cur);cur=[];n=0}});
  if(cur.length)pages.push(cur);
@@ -384,12 +415,13 @@ function pasteParas(t){
 }
 function askPaste(){
  const w=document.createElement('div');w.style.cssText='position:fixed;inset:0;background:#000a;z-index:50;display:flex;align-items:center;justify-content:center;padding:14px;overflow:auto';
- w.innerHTML='<div style="background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:12px;padding:14px;width:100%;max-width:560px"><div style="font-size:14px;line-height:1.6;margin-bottom:8px"><b>📝 যেকোনো লেখা/ট্রান্সক্রিপ্ট পেস্ট করুন</b> (যেকোনো ভাষা)। বাংলায় অনুবাদ হবে, আর 📚 তাকে সেভ থাকবে, পরে এসে পড়তে পারবেন।</div><input id="ptt" placeholder="নাম (ঐচ্ছিক), যেমন: ইউটিউব ভিডিও ১" style="width:100%;font:inherit;font-size:14px;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:6px;margin-bottom:6px"><textarea id="ptx" style="width:100%;height:40vh;font:inherit;font-size:14px;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:8px"></textarea><div style="display:flex;gap:8px;margin-top:8px"><button id="ptc">📋 পেস্ট</button><button class="p" id="pto" style="flex:1">অনুবাদ ও সেভ</button><button id="ptn">বাতিল</button></div></div>';
+ w.innerHTML='<div style="background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:12px;padding:14px;width:100%;max-width:560px"><div style="font-size:14px;line-height:1.6;margin-bottom:8px"><b>📝 যেকোনো লেখা/ট্রান্সক্রিপ্ট পেস্ট করুন</b> (যেকোনো ভাষা)। বাংলায় অনুবাদ হবে, আর 📚 তাকে সেভ থাকবে, পরে এসে পড়তে পারবেন।</div><input id="ptt" placeholder="নাম (ঐচ্ছিক), যেমন: ইউটিউব ভিডিও ১" style="width:100%;font:inherit;font-size:14px;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:6px;margin-bottom:6px"><textarea id="ptx" style="width:100%;height:40vh;font:inherit;font-size:14px;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:8px"></textarea><label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-top:8px"><input type="checkbox" id="pta"> পড়ার সাথে সাথে বাকি অংশ অটো অনুবাদ হোক (ছোট ছোট ধাপে, লম্বা লেকচারের জন্য)</label><div style="display:flex;gap:8px;margin-top:8px"><button id="ptc">📋 পেস্ট</button><button class="p" id="pto" style="flex:1">অনুবাদ ও সেভ</button><button id="ptn">বাতিল</button></div></div>';
  document.body.append(w);
  w.querySelector('#ptc').onclick=async()=>{try{const t=await navigator.clipboard.readText();if(!t){toast('ক্লিপবোর্ড খালি');return}w.querySelector('#ptx').value=t}catch(e){toast('ঘরে চেপে ধরে Paste দিন',4000)}};
+ w.querySelector('#pta').checked=ls.get('autoprep')!=='0';
  w.querySelector('#ptn').onclick=()=>w.remove();
  w.querySelector('#pto').onclick=()=>{
-  const t=w.querySelector('#ptx').value;const p=pasteParas(t);
+  const t=w.querySelector('#ptx').value;ls.set('autoprep',w.querySelector('#pta').checked?'1':'0');const p=pasteParas(t);
   if(!p.length){toast('কিছু পেস্ট করা হয়নি');return}
   const ti=(w.querySelector('#ptt').value.trim()||t.trim().replace(/\s+/g,' ').slice(0,40));
   w.remove();webFinish('',ti,'পেস্ট',p,2600);
@@ -1308,11 +1340,12 @@ async function preAI(i0){
  const pp=$('#pp')||document.createElement('div');preStop=false;let i=i0||0;
  while(i<total&&!preStop){
   const pend=[];let n=0,j=i;
-  while(j<total&&n<8000&&j<i+12){let ps;try{ps=await book.get(j)}catch(e){ps=[]}pend.push(...ps);n+=ps.join('').length;j++}
+  const LIM=/^pos:web:/.test(key)?3000:8000;
+  while(j<total&&n<LIM&&j<i+12){let ps;try{ps=await book.get(j)}catch(e){ps=[]}pend.push(...ps);n+=ps.join('').length;j++}
   pp.textContent='AI অনুবাদ হচ্ছে… পাতা '+(i+1)+'–'+j+' / '+total;preUi('⬇ AI অনুবাদ… পাতা '+(i+1)+'–'+j+'/'+total,Math.round(j/total*100));ls.set('pre:'+key,String(i));
   const c0=aiCalls;
   try{
-   const o=await gemTr(pend,9000);
+   const o=await gemTr(pend,LIM+1000);
    try{await prefetchWords(o.filter(x=>x))}catch(e){}
    try{const ew=[...new Set(pend.filter(p=>lat(p)>bn(p)).flatMap(p=>contentWords(p).map(w=>w.toLowerCase())))];if(ew.length)await bnOf(ew)}catch(e){}
   }catch(e){pp.textContent=gerr(e).replace(' এখন Google Translate চলছে।','').replace(' Google Translate দিয়ে চলছে।','')+' পাতা '+i+' পর্যন্ত জমা হয়েছে। কোটা ফিরলে (সাধারণত পরের দিন) আবার চালান, এখান থেকে এগোবে।';return}
